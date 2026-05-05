@@ -1,0 +1,44 @@
+$$ smteo_mutation_template.wds
+$$ Purpose:
+$$   Template for instrumenting destructive mutation inside
+$$   SepMakeTokenEffectiveOnly and later RtlSidHashInitialize call-sites.
+$$ Usage:
+$$   1. Run symbol_discovery.wds and fill token_offsets.wds.
+$$   2. Replace every ${...} placeholder below with an exact instruction
+$$      address from IDA or WinDbg disassembly for build 26100.7019.
+$$   3. Keep comments documenting how each address was selected.
+$$   4. Run with:
+$$        $$><windbg\token_offsets.wds
+$$        .logopen /t C:\kdlogs\smteo_mutation.log
+$$        $$><windbg\smteo_mutation_template.wds
+$$        g
+$$ Notes:
+$$   The script assumes rcx is the token at SMTEO entry, then saves it in
+$$   @$t20. If your disassembly proves a different token base register is used,
+$$   update the breakpoint commands accordingly.
+
+bp nt!SepMakeTokenEffectiveOnly "r @$t20=@rcx; .printf \"EV SMTEO_ENTRY tid=%p proc=%p token=%p resource=%p uag=%p uag_count=%x ret=%p\\n\", @$thread, @$proc, @$t20, poi(@$t20+${TOKEN_RESOURCE_PTR_OFF}), poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), poi(@rsp); gc"
+
+$$ Fill with the instruction immediately before UserAndGroupCount is decremented.
+bp ${SMTEO_COUNT_DEC_ADDR} ".printf \"EV MUT_COUNT_BEFORE tid=%p token=%p uag=%p uag_count=%x rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p\\n\", @$thread, @$t20, poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11; dq poi(@$t20+${TOKEN_UAG_OFF}) L${UAG_DUMP_ENTRIES}; gc"
+
+$$ Fill with the instruction immediately after the count decrement is visible.
+bp ${SMTEO_COUNT_DEC_AFTER_ADDR} ".printf \"EV MUT_COUNT_AFTER tid=%p token=%p uag=%p uag_count=%x rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p\\n\", @$thread, @$t20, poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11; dq poi(@$t20+${TOKEN_UAG_OFF}) L${UAG_DUMP_ENTRIES}; gc"
+
+$$ Fill with the instruction/call that copies the tail entry over the deleted entry.
+bp ${SMTEO_TAIL_COPY_ADDR} ".printf \"EV MUT_TAIL_COPY_BEFORE tid=%p token=%p uag=%p uag_count=%x rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p\\n\", @$thread, @$t20, poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11; dq poi(@$t20+${TOKEN_UAG_OFF}) L${UAG_DUMP_ENTRIES}; gc"
+
+$$ Fill with the instruction immediately after the tail entry copy.
+bp ${SMTEO_TAIL_COPY_AFTER_ADDR} ".printf \"EV MUT_TAIL_COPY_AFTER tid=%p token=%p uag=%p uag_count=%x rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p\\n\", @$thread, @$t20, poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11; dq poi(@$t20+${TOKEN_UAG_OFF}) L${UAG_DUMP_ENTRIES}; gc"
+
+$$ Fill with index/default-owner/primary-group fix-up instructions.
+bp ${SMTEO_INDEX_FIX_1_ADDR} ".printf \"EV MUT_INDEX_FIX index=1 tid=%p token=%p uag=%p uag_count=%x rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p\\n\", @$thread, @$t20, poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9; gc"
+bp ${SMTEO_INDEX_FIX_2_ADDR} ".printf \"EV MUT_INDEX_FIX index=2 tid=%p token=%p uag=%p uag_count=%x rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p\\n\", @$thread, @$t20, poi(@$t20+${TOKEN_UAG_OFF}), dwo(@$t20+${TOKEN_UAG_COUNT_OFF}), @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9; gc"
+
+$$ Fill with each RtlSidHashInitialize call-site inside SepDuplicateToken.
+bp ${HASH_CALLSITE_1} ".printf \"EV HASH_REBUILD site=1 tid=%p proc=%p rip=%p rcx=%p rdx=%p r8=%p r9=%p ret=%p\\n\", @$thread, @$proc, @rip, @rcx, @rdx, @r8, @r9, poi(@rsp); gc"
+bp ${HASH_CALLSITE_2} ".printf \"EV HASH_REBUILD site=2 tid=%p proc=%p rip=%p rcx=%p rdx=%p r8=%p r9=%p ret=%p\\n\", @$thread, @$proc, @rip, @rcx, @rdx, @r8, @r9, poi(@rsp); gc"
+bp ${HASH_CALLSITE_3} ".printf \"EV HASH_REBUILD site=3 tid=%p proc=%p rip=%p rcx=%p rdx=%p r8=%p r9=%p ret=%p\\n\", @$thread, @$proc, @rip, @rcx, @rdx, @r8, @r9, poi(@rsp); gc"
+
+.printf "EV SMTEO_MUTATION_TEMPLATE_READY\n"
+

@@ -1,0 +1,20 @@
+$$ resource_state_trace.wds
+$$ Purpose:
+$$   Lightweight resource-scope tracing around SepDuplicateToken release and
+$$   SepMakeTokenEffectiveOnly entry. Requires windbg/token_offsets.wds.
+$$ Usage:
+$$   $$><windbg\token_offsets.wds
+$$   .logopen /t C:\kdlogs\resource_state.log
+$$   $$><windbg\resource_state_trace.wds
+$$   g
+$$ Notes:
+$$   This script stores the most recent released resource per debugger session
+$$   in pseudo-registers for quick same-thread comparison. The parser performs
+$$   stronger same-thread correlation from EV lines.
+
+bp ${SEP_DUP_EXRELEASE_CALLSITE} "r @$t10=@rcx; r @$t11=@$thread; .printf \"EV RELEASE_RESOURCE tid=%p proc=%p resource=%p rcx=%p rbx=%p rdi=%p rsi=%p r12=%p r13=%p r14=%p r15=%p ret=%p\\n\", @$thread, @$proc, @rcx, @rcx, @rbx, @rdi, @rsi, @r12, @r13, @r14, @r15, poi(@rsp); .printf \"EV STACK tag=RELEASE_RESOURCE tid=%p\\n\", @$thread; kv 8; gc"
+
+bp nt!SepMakeTokenEffectiveOnly ".printf \"EV SMTEO_RESOURCE tid=%p proc=%p token=%p resource=%p last_release_tid=%p last_release_resource=%p same_thread=%x same_resource=%x ret=%p\\n\", @$thread, @$proc, @rcx, poi(@rcx+${TOKEN_RESOURCE_PTR_OFF}), @$t11, @$t10, (@$thread==@$t11), (poi(@rcx+${TOKEN_RESOURCE_PTR_OFF})==@$t10), poi(@rsp); .printf \"EV STACK tag=SMTEO_RESOURCE tid=%p\\n\", @$thread; kv 8; gc"
+
+.printf "EV RESOURCE_STATE_TRACE_READY\n"
+

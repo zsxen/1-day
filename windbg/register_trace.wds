@@ -1,0 +1,37 @@
+$$ register_trace.wds
+$$ Purpose:
+$$   Register-level dataflow trace only. This logs registers at configured
+$$   SepDuplicateToken, resource, SMTEO, mutation, and hash call-sites.
+$$   It does not modify target execution state beyond breakpoints/logging.
+$$ Usage:
+$$   $$><windbg\token_offsets.wds
+$$   .logopen /t C:\kdlogs\register_trace.log
+$$   $$><windbg\register_trace.wds
+$$   g
+
+bp nt!SepDuplicateToken ".printf \"EV REG tag=SEP_DUP_ENTRY tid=%p proc=%p rip=%p ret=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; kv 6; gc"
+
+bp ${SEP_DUP_OBJECT_CREATE_RET} ".printf \"EV REG tag=OBJECT_CREATE_RET tid=%p proc=%p rip=%p ret=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; kv 6; gc"
+
+bp ${SEP_DUP_EXACQUIRE_CALLSITE} ".printf \"EV REG tag=EXACQUIRE_CALLSITE tid=%p proc=%p rip=%p ret=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r12, @r13, @r14, @r15; gc"
+
+bp ${SEP_DUP_EXRELEASE_CALLSITE} ".printf \"EV REG tag=EXRELEASE_CALLSITE tid=%p proc=%p rip=%p ret=%p resource_rcx=%p rdi_plus_30=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rcx, poi(@rdi+0x30), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r12, @r13, @r14, @r15; kv 8; gc"
+
+bp ${SEP_DUP_SMTEO_CALLSITE} ".printf \"EV REG tag=SEP_DUP_SMTEO_CALLSITE tid=%p proc=%p rip=%p ret=%p smteo_arg_rcx=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rcx, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r12, @r13, @r14, @r15; kv 8; gc"
+
+bp nt!SepMakeTokenEffectiveOnly ".printf \"EV REG tag=SMTEO_ENTRY tid=%p proc=%p rip=%p ret=%p token_rcx=%p token_resource=%p uag=%p uag_count=%x rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rcx, poi(@rcx+${TOKEN_RESOURCE_PTR_OFF}), poi(@rcx+${TOKEN_UAG_OFF}), dwo(@rcx+${TOKEN_UAG_COUNT_OFF}), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; kv 8; gc"
+
+bp ${SMTEO_COUNT_DEC_ADDR} ".printf \"EV REG tag=SMTEO_COUNT_DEC tid=%p proc=%p rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; gc"
+
+bp ${SMTEO_TAIL_COPY_ADDR} ".printf \"EV REG tag=SMTEO_TAIL_COPY tid=%p proc=%p rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; gc"
+
+bp ${SMTEO_INDEX_FIX_1_ADDR} ".printf \"EV REG tag=SMTEO_INDEX_FIX_1 tid=%p proc=%p rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; gc"
+
+bp ${SMTEO_INDEX_FIX_2_ADDR} ".printf \"EV REG tag=SMTEO_INDEX_FIX_2 tid=%p proc=%p rip=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r10, @r11, @r12, @r13, @r14, @r15; gc"
+
+bp ${HASH_CALLSITE_1} ".printf \"EV REG tag=HASH_CALLSITE_1 tid=%p proc=%p rip=%p ret=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r12, @r13, @r14, @r15; gc"
+bp ${HASH_CALLSITE_2} ".printf \"EV REG tag=HASH_CALLSITE_2 tid=%p proc=%p rip=%p ret=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r12, @r13, @r14, @r15; gc"
+bp ${HASH_CALLSITE_3} ".printf \"EV REG tag=HASH_CALLSITE_3 tid=%p proc=%p rip=%p ret=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r12=%p r13=%p r14=%p r15=%p\\n\", @$thread, @$proc, @rip, poi(@rsp), @rax, @rbx, @rcx, @rdx, @rsi, @rdi, @r8, @r9, @r12, @r13, @r14, @r15; gc"
+
+.printf "EV REGISTER_TRACE_READY\n"
+

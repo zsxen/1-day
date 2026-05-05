@@ -1,0 +1,45 @@
+$$ symbol_discovery.wds
+$$ Purpose:
+$$   Reload nt symbols, print relevant function addresses, dump _TOKEN if public
+$$   symbols expose it, and guide manual offset extraction.
+$$ Usage:
+$$   .logopen /t C:\kdlogs\symbol_discovery.log
+$$   $$><windbg\symbol_discovery.wds
+
+.printf "EV SYMBOL_DISCOVERY_START target=Windows_11_24H2 build=26100.7019\n"
+.symfix
+.sympath+ srv*C:\symbols*https://msdl.microsoft.com/download/symbols
+.reload /f nt
+lm m nt
+
+.printf "EV SYMBOL name=SepDuplicateToken "
+x nt!SepDuplicateToken
+.printf "EV SYMBOL name=SepMakeTokenEffectiveOnly "
+x nt!SepMakeTokenEffectiveOnly
+.printf "EV SYMBOL name=SepDeleteToken "
+x nt!SepDeleteToken
+.printf "EV SYMBOL_SEARCH pattern=Sep*Delete*Token\n"
+x nt!Sep*Delete*Token*
+.printf "EV SYMBOL_SEARCH pattern=Sep*Free*Token\n"
+x nt!Sep*Free*Token*
+.printf "EV SYMBOL name=RtlSidHashInitialize "
+x nt!RtlSidHashInitialize
+.printf "EV SYMBOL name=ExReleaseResourceLite "
+x nt!ExReleaseResourceLite
+.printf "EV SYMBOL name=ExAcquireResourceSharedLite "
+x nt!ExAcquireResourceSharedLite
+.printf "EV SYMBOL name=ExFreePoolWithTag "
+x nt!ExFreePoolWithTag
+
+.printf "EV DT_TOKEN_BEGIN\n"
+dt nt!_TOKEN
+.printf "EV DT_TOKEN_END\n"
+
+.printf "EV DISASM_HINT name=SepDuplicateToken\n"
+uf nt!SepDuplicateToken
+.printf "EV DISASM_HINT name=SepMakeTokenEffectiveOnly\n"
+uf nt!SepMakeTokenEffectiveOnly
+
+.printf "EV TODO Fill windbg/token_offsets.wds and tools/token_offsets.json with confirmed offsets and call-sites.\n"
+.printf "EV SYMBOL_DISCOVERY_END\n"
+

@@ -1,0 +1,26 @@
+$$ concurrent_paths_trace.wds
+$$ Purpose:
+$$   Detect overlapping token duplication/delete/free paths while one thread is
+$$   inside SepMakeTokenEffectiveOnly. Requires confirmed ranges/offsets.
+$$ Usage:
+$$   $$><windbg\token_offsets.wds
+$$   .logopen /t C:\kdlogs\concurrent_paths.log
+$$   $$><windbg\concurrent_paths_trace.wds
+$$   g
+$$ Notes:
+$$   @$t30 stores the current SMTEO target token. @$t31 stores the owner thread.
+$$   This is intentionally narrow: ExFreePoolWithTag logs only when return
+$$   address falls inside configured token ranges.
+
+bp nt!SepMakeTokenEffectiveOnly "r @$t30=@rcx; r @$t31=@$thread; .printf \"EV TARGET_TOKEN_SET tid=%p proc=%p token=%p resource=%p uag=%p uag_count=%x ret=%p\\n\", @$thread, @$proc, @$t30, poi(@$t30+${TOKEN_RESOURCE_PTR_OFF}), poi(@$t30+${TOKEN_UAG_OFF}), dwo(@$t30+${TOKEN_UAG_COUNT_OFF}), poi(@rsp); gc"
+
+bp ${SMTEO_END} ".if (@$thread==@$t31) { .printf \"EV SMTEO_EXIT tid=%p proc=%p token=%p rip=%p\\n\", @$thread, @$proc, @$t30, @rip; r @$t30=0; r @$t31=0; } ; gc"
+
+bp nt!SepDuplicateToken ".if (@$t30 != 0) { .printf \"EV CONCURRENT_SEP_DUP tid=%p owner_tid=%p proc=%p rcx=%p target=%p same_token=%x ret=%p\\n\", @$thread, @$t31, @$proc, @rcx, @$t30, (@rcx==@$t30), poi(@rsp); .if (@rcx==@$t30) { kv 10; } } ; gc"
+
+bp ${SEP_DELETE_START} ".if (@$t30 != 0) { .printf \"EV CONCURRENT_TOKEN_DELETE tid=%p owner_tid=%p proc=%p rcx=%p target=%p same_token=%x rip=%p ret=%p\\n\", @$thread, @$t31, @$proc, @rcx, @$t30, (@rcx==@$t30), @rip, poi(@rsp); .if (@rcx==@$t30) { kv 12; } } ; gc"
+
+bp nt!ExFreePoolWithTag ".if ((poi(@rsp) >= ${SEP_DUP_START} && poi(@rsp) < ${SEP_DUP_END}) || (poi(@rsp) >= ${SEP_DELETE_START} && poi(@rsp) < ${SEP_DELETE_END})) { .printf \"EV TOKEN_FREE tid=%p owner_tid=%p proc=%p ptr=%p tag=%x ret=%p target=%p rip=%p\\n\", @$thread, @$t31, @$proc, @rcx, @rdx, poi(@rsp), @$t30, @rip; kv 10; } ; gc"
+
+.printf "EV CONCURRENT_PATHS_TRACE_READY\n"
+

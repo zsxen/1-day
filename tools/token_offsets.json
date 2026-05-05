@@ -1,0 +1,60 @@
+{
+  "environment": {
+    "target": "Windows 11 Pro 24H2",
+    "build": "26100.7019",
+    "notes": "Fill values from WinDbg dt/disassembly on the target VM. Null means unknown/unconfirmed."
+  },
+  "token_offsets": {
+    "TOKEN_RESOURCE_PTR_OFF": null,
+    "TOKEN_UAG_OFF": null,
+    "TOKEN_UAG_COUNT_OFF": null,
+    "TOKEN_RESTRICTED_SIDS_OFF": null,
+    "TOKEN_RESTRICTED_SID_COUNT_OFF": null,
+    "TOKEN_CAPABILITIES_OFF": null,
+    "TOKEN_CAPABILITY_COUNT_OFF": null,
+    "TOKEN_DEFAULT_OWNER_INDEX_OFF": null,
+    "TOKEN_PRIMARY_GROUP_OFF": null
+  },
+  "function_ranges": {
+    "SepDuplicateToken": {
+      "start": null,
+      "end": null
+    },
+    "SepMakeTokenEffectiveOnly": {
+      "start": null,
+      "end": null
+    },
+    "SepDeleteToken_or_cleanup": {
+      "start": null,
+      "end": null
+    }
+  },
+  "call_sites": {
+    "SepDuplicateToken_ExAcquireResourceSharedLite": null,
+    "SepDuplicateToken_ExReleaseResourceLite": null,
+    "SepDuplicateToken_SepMakeTokenEffectiveOnly": null,
+    "SepDuplicateToken_object_create_return": null,
+    "RtlSidHashInitialize_1": null,
+    "RtlSidHashInitialize_2": null,
+    "RtlSidHashInitialize_3": null
+  },
+  "smteo_mutation_sites": {
+    "count_decrement": null,
+    "count_decrement_after": null,
+    "tail_copy": null,
+    "tail_copy_after": null,
+    "index_fix_1": null,
+    "index_fix_2": null
+  },
+  "manual_confirmation": {
+    "old_token_register_at_SepDuplicateToken_entry": null,
+    "new_token_register_after_object_creation": null,
+    "smteo_token_argument_register": "rcx",
+    "resource_register_before_ExReleaseResourceLite": "rcx",
+    "resource_expression_candidate": null,
+    "smteo_token_base_register": null,
+    "uag_pointer_register_near_mutation": null,
+    "uag_count_register_near_mutation": null
+  }
+}
+
