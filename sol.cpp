@@ -93,12 +93,57 @@
 #ifndef PROCESS_QUERY_LIMITED_INFORMATION
 #define PROCESS_QUERY_LIMITED_INFORMATION 0x00001000UL
 #endif
+#ifndef TOKEN_QUERY_SOURCE
+#define TOKEN_QUERY_SOURCE 0x0010
+#endif
 #ifndef SECURITY_DYNAMIC_TRACKING
 #define SECURITY_DYNAMIC_TRACKING TRUE
+#endif
+#ifndef SECURITY_MANDATORY_UNTRUSTED_RID
+#define SECURITY_MANDATORY_UNTRUSTED_RID 0x00000000L
+#endif
+#ifndef SECURITY_MANDATORY_LOW_RID
+#define SECURITY_MANDATORY_LOW_RID 0x00001000L
+#endif
+#ifndef SECURITY_MANDATORY_MEDIUM_RID
+#define SECURITY_MANDATORY_MEDIUM_RID 0x00002000L
+#endif
+#ifndef SECURITY_MANDATORY_HIGH_RID
+#define SECURITY_MANDATORY_HIGH_RID 0x00003000L
+#endif
+#ifndef SECURITY_MANDATORY_SYSTEM_RID
+#define SECURITY_MANDATORY_SYSTEM_RID 0x00004000L
+#endif
+#ifndef SECURITY_MANDATORY_PROTECTED_PROCESS_RID
+#define SECURITY_MANDATORY_PROTECTED_PROCESS_RID 0x00005000L
+#endif
+#ifndef SE_GROUP_INTEGRITY
+#define SE_GROUP_INTEGRITY 0x00000020L
 #endif
 
 struct LocalTokenLinkedToken {
     HANDLE LinkedToken;
+};
+
+struct LocalTokenOrigin {
+    LUID OriginatingLogonSession;
+};
+
+struct LocalTokenSource {
+    CHAR SourceName[8];
+    LUID SourceIdentifier;
+};
+
+struct LocalTokenMandatoryLabel {
+    SID_AND_ATTRIBUTES Label;
+};
+
+struct LocalTokenMandatoryPolicy {
+    DWORD Policy;
+};
+
+struct LocalTokenAppContainerInformation {
+    PSID TokenAppContainer;
 };
 
 using NtQueryInformationToken_t = NTSTATUS(NTAPI *)(HANDLE, TOKEN_INFORMATION_CLASS, PVOID, ULONG, PULONG);
@@ -159,6 +204,7 @@ struct Config {
     bool yes_local_vm = false;
     bool no_filter = false;
     bool no_duplicate = false;
+    bool no_impersonate = false;
     bool no_query19 = false;
     bool no_query_shadow = false;
     bool print_kd_cheatsheet = false;
@@ -187,6 +233,8 @@ struct Stats {
     OpCounters filter;
     OpCounters openclose;
     OpCounters targetchurn;
+    OpCounters impersonate;
+    OpCounters relation;
     std::atomic<uint64_t> total_ops{0};
     std::mutex status_mutex;
     std::map<NTSTATUS, uint64_t> statuses;
@@ -195,6 +243,8 @@ struct Stats {
 static std::mutex g_log_mutex;
 static std::atomic<bool> g_stop{false};
 static NativeApis g_nt;
+
+std::string format_status(NTSTATUS st);
 
 std::string narrow(const std::wstring &w) {
     if (w.empty()) {
@@ -221,6 +271,21 @@ std::string hex_ptr(const void *p) {
     return oss.str();
 }
 
+std::string utc_timestamp() {
+    SYSTEMTIME st = {};
+    GetSystemTime(&st);
+    std::ostringstream oss;
+    oss << std::setfill('0')
+        << std::setw(4) << st.wYear << "-"
+        << std::setw(2) << st.wMonth << "-"
+        << std::setw(2) << st.wDay << "T"
+        << std::setw(2) << st.wHour << ":"
+        << std::setw(2) << st.wMinute << ":"
+        << std::setw(2) << st.wSecond << "."
+        << std::setw(3) << st.wMilliseconds << "Z";
+    return oss.str();
+}
+
 void dbg_line(const std::string &line) {
     std::string s = "[sol.cpp] " + line + "\n";
     OutputDebugStringA(s.c_str());
@@ -233,6 +298,27 @@ void log_line(const std::string &line, bool dbg = false) {
     }
     if (dbg) {
         dbg_line(line);
+    }
+}
+
+void kd_breadcrumb(const std::string &phase,
+                   HANDLE h0 = nullptr,
+                   HANDLE h1 = nullptr,
+                   NTSTATUS st = STATUS_SUCCESS,
+                   bool console = true) {
+    std::ostringstream oss;
+    oss << "[kd.ctx] utc=" << utc_timestamp()
+        << " tick=" << GetTickCount64()
+        << " pid=" << GetCurrentProcessId()
+        << " tid=" << GetCurrentThreadId()
+        << " phase=" << phase
+        << " h0=" << hex_ptr(h0)
+        << " h1=" << hex_ptr(h1)
+        << " status=" << format_status(st);
+    if (console) {
+        log_line(oss.str(), true);
+    } else {
+        dbg_line(oss.str());
     }
 }
 
@@ -318,6 +404,8 @@ Config parse_args(int argc, wchar_t **argv) {
             cfg.no_filter = true;
         } else if (arg == L"--no-duplicate") {
             cfg.no_duplicate = true;
+        } else if (arg == L"--no-impersonate") {
+            cfg.no_impersonate = true;
         } else if (arg == L"--no-query19") {
             cfg.no_query19 = true;
         } else if (arg == L"--no-query-shadow") {
@@ -342,6 +430,7 @@ void print_help() {
     log_line("  --yes-local-vm                 required with --enable-set-probes");
     log_line("  --no-filter                    disable NtFilterToken stress");
     log_line("  --no-duplicate                 disable NtDuplicateToken stress");
+    log_line("  --no-impersonate               disable safe self-impersonation attach/revert churn");
     log_line("  --no-query19                   disable Query(19) stress");
     log_line("  --no-query-shadow              disable Query(-2) stress");
     log_line("  --print-kd-cheatsheet          print WinDbg commands and exit");
@@ -377,6 +466,9 @@ void print_kd_cheatsheet() {
     log_line("User-mode correlation:");
     log_line("  !process 0 1 sol.exe");
     log_line("  !handle 0 3 <sol_pid>");
+    log_line("  .printf \"pid/tid from [kd.ctx] lines, then inspect matching thread/process state\"");
+    log_line("  !thread");
+    log_line("  !token");
     log_line("");
     log_line("This verifier does not read kernel addresses or perform exploit steps.");
     log_line("============================================");
@@ -574,6 +666,45 @@ std::string impersonation_level_to_string(SECURITY_IMPERSONATION_LEVEL level) {
     }
 }
 
+std::string sid_summary(PSID sid) {
+    if (sid == nullptr) {
+        return "sid=null";
+    }
+    if (!IsValidSid(sid)) {
+        return "sid=invalid";
+    }
+    UCHAR count = *GetSidSubAuthorityCount(sid);
+    DWORD last_rid = count > 0 ? *GetSidSubAuthority(sid, static_cast<DWORD>(count - 1)) : 0;
+    SID_IDENTIFIER_AUTHORITY *auth = GetSidIdentifierAuthority(sid);
+    std::ostringstream oss;
+    oss << "subauths=" << static_cast<unsigned int>(count)
+        << " last_rid=" << hex_u32(last_rid)
+        << " authority=";
+    for (int i = 0; i < 6; ++i) {
+        oss << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(auth->Value[i]);
+    }
+    return oss.str();
+}
+
+std::string integrity_rid_to_string(DWORD rid) {
+    if (rid < SECURITY_MANDATORY_LOW_RID) {
+        return "Untrusted";
+    }
+    if (rid < SECURITY_MANDATORY_MEDIUM_RID) {
+        return "Low";
+    }
+    if (rid < SECURITY_MANDATORY_HIGH_RID) {
+        return "Medium";
+    }
+    if (rid < SECURITY_MANDATORY_SYSTEM_RID) {
+        return "High";
+    }
+    if (rid < SECURITY_MANDATORY_PROTECTED_PROCESS_RID) {
+        return "System";
+    }
+    return "ProtectedProcessOrAbove";
+}
+
 bool get_token_info_fixed(HANDLE token, TOKEN_INFORMATION_CLASS cls, void *buf, DWORD cb, DWORD *ret = nullptr) {
     DWORD local_ret = 0;
     BOOL ok = GetTokenInformation(token, cls, buf, cb, &local_ret);
@@ -650,6 +781,442 @@ void inspect_linked_token_win32(HANDLE token) {
     }
 }
 
+bool get_token_info_variable(HANDLE token, TOKEN_INFORMATION_CLASS cls, std::vector<BYTE> *buf, DWORD *gle_out = nullptr, DWORD *ret_out = nullptr) {
+    if (buf == nullptr) {
+        return false;
+    }
+    DWORD needed = 0;
+    SetLastError(ERROR_SUCCESS);
+    GetTokenInformation(token, cls, nullptr, 0, &needed);
+    DWORD first_gle = GetLastError();
+    if (needed == 0) {
+        if (gle_out != nullptr) {
+            *gle_out = first_gle;
+        }
+        if (ret_out != nullptr) {
+            *ret_out = 0;
+        }
+        return false;
+    }
+
+    buf->assign(needed, 0);
+    SetLastError(ERROR_SUCCESS);
+    BOOL ok = GetTokenInformation(token, cls, buf->data(), needed, &needed);
+    DWORD gle = ok ? ERROR_SUCCESS : GetLastError();
+    if (gle_out != nullptr) {
+        *gle_out = gle;
+    }
+    if (ret_out != nullptr) {
+        *ret_out = needed;
+    }
+    return ok != FALSE;
+}
+
+void log_token_dword_info(HANDLE token, TOKEN_INFORMATION_CLASS cls, const std::string &label) {
+    DWORD value = 0;
+    DWORD ret = 0;
+    SetLastError(ERROR_SUCCESS);
+    bool ok = get_token_info_fixed(token, cls, &value, sizeof(value), &ret);
+    DWORD gle = ok ? ERROR_SUCCESS : GetLastError();
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok) << " value=" << value << " gle=" << gle << " retLen=" << ret;
+    log_line(oss.str());
+}
+
+void log_token_source_info(HANDLE token, const std::string &label) {
+    LocalTokenSource source = {};
+    DWORD ret = 0;
+    SetLastError(ERROR_SUCCESS);
+    bool ok = get_token_info_fixed(token, static_cast<TOKEN_INFORMATION_CLASS>(7), &source, sizeof(source), &ret);
+    DWORD gle = ok ? ERROR_SUCCESS : GetLastError();
+
+    std::string name;
+    for (size_t i = 0; i < sizeof(source.SourceName); ++i) {
+        if (source.SourceName[i] == '\0') {
+            break;
+        }
+        name.push_back(source.SourceName[i]);
+    }
+
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok)
+        << " source=" << (name.empty() ? "<empty>" : name)
+        << " source_id=" << luid_to_string(source.SourceIdentifier)
+        << " gle=" << gle
+        << " retLen=" << ret;
+    log_line(oss.str());
+}
+
+void log_token_origin_info(HANDLE token, const std::string &label) {
+    LocalTokenOrigin origin = {};
+    DWORD ret = 0;
+    SetLastError(ERROR_SUCCESS);
+    bool ok = get_token_info_fixed(token, static_cast<TOKEN_INFORMATION_CLASS>(17), &origin, sizeof(origin), &ret);
+    DWORD gle = ok ? ERROR_SUCCESS : GetLastError();
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok)
+        << " origin_logon=" << luid_to_string(origin.OriginatingLogonSession)
+        << " gle=" << gle
+        << " retLen=" << ret;
+    log_line(oss.str());
+}
+
+void log_token_user_like_info(HANDLE token, TOKEN_INFORMATION_CLASS cls, const std::string &label) {
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, cls, &buf, &gle, &ret);
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok) << " gle=" << gle << " retLen=" << ret;
+    if (ok && !buf.empty()) {
+        const TOKEN_USER *user = reinterpret_cast<const TOKEN_USER *>(buf.data());
+        oss << " " << sid_summary(user->User.Sid)
+            << " attrs=" << hex_u32(user->User.Attributes);
+    }
+    log_line(oss.str());
+}
+
+void log_token_owner_info(HANDLE token, const std::string &label) {
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, static_cast<TOKEN_INFORMATION_CLASS>(4), &buf, &gle, &ret);
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok) << " gle=" << gle << " retLen=" << ret;
+    if (ok && !buf.empty()) {
+        const TOKEN_OWNER *owner = reinterpret_cast<const TOKEN_OWNER *>(buf.data());
+        oss << " " << sid_summary(owner->Owner);
+    }
+    log_line(oss.str());
+}
+
+void log_token_groups_info(HANDLE token, TOKEN_INFORMATION_CLASS cls, const std::string &label) {
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, cls, &buf, &gle, &ret);
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok) << " gle=" << gle << " retLen=" << ret;
+    if (ok && !buf.empty()) {
+        const TOKEN_GROUPS *groups = reinterpret_cast<const TOKEN_GROUPS *>(buf.data());
+        DWORD enabled = 0;
+        DWORD deny_only = 0;
+        DWORD integrity = 0;
+        for (DWORD i = 0; i < groups->GroupCount; ++i) {
+            DWORD attrs = groups->Groups[i].Attributes;
+            if ((attrs & SE_GROUP_ENABLED) != 0) {
+                ++enabled;
+            }
+            if ((attrs & SE_GROUP_USE_FOR_DENY_ONLY) != 0) {
+                ++deny_only;
+            }
+            if ((attrs & SE_GROUP_INTEGRITY) != 0) {
+                ++integrity;
+            }
+        }
+        oss << " count=" << groups->GroupCount
+            << " enabled=" << enabled
+            << " deny_only=" << deny_only
+            << " integrity_groups=" << integrity;
+        if (groups->GroupCount > 0) {
+            oss << " first={" << sid_summary(groups->Groups[0].Sid)
+                << " attrs=" << hex_u32(groups->Groups[0].Attributes) << "}";
+        }
+    }
+    log_line(oss.str());
+}
+
+void log_token_integrity_info(HANDLE token, const std::string &label) {
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, static_cast<TOKEN_INFORMATION_CLASS>(25), &buf, &gle, &ret);
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok) << " gle=" << gle << " retLen=" << ret;
+    if (ok && !buf.empty()) {
+        const LocalTokenMandatoryLabel *mandatory = reinterpret_cast<const LocalTokenMandatoryLabel *>(buf.data());
+        DWORD rid = 0;
+        if (mandatory->Label.Sid != nullptr && IsValidSid(mandatory->Label.Sid)) {
+            UCHAR count = *GetSidSubAuthorityCount(mandatory->Label.Sid);
+            if (count > 0) {
+                rid = *GetSidSubAuthority(mandatory->Label.Sid, static_cast<DWORD>(count - 1));
+            }
+        }
+        oss << " rid=" << hex_u32(rid)
+            << " level=" << integrity_rid_to_string(rid)
+            << " attrs=" << hex_u32(mandatory->Label.Attributes)
+            << " " << sid_summary(mandatory->Label.Sid);
+    }
+    log_line(oss.str());
+}
+
+void log_token_mandatory_policy_info(HANDLE token, const std::string &label) {
+    LocalTokenMandatoryPolicy policy = {};
+    DWORD ret = 0;
+    SetLastError(ERROR_SUCCESS);
+    bool ok = get_token_info_fixed(token, static_cast<TOKEN_INFORMATION_CLASS>(27), &policy, sizeof(policy), &ret);
+    DWORD gle = ok ? ERROR_SUCCESS : GetLastError();
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok)
+        << " policy=" << hex_u32(policy.Policy)
+        << " gle=" << gle
+        << " retLen=" << ret;
+    log_line(oss.str());
+}
+
+void log_token_appcontainer_sid_info(HANDLE token, const std::string &label) {
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, static_cast<TOKEN_INFORMATION_CLASS>(31), &buf, &gle, &ret);
+    std::ostringstream oss;
+    oss << label << " ok=" << yes_no(ok) << " gle=" << gle << " retLen=" << ret;
+    if (ok && !buf.empty()) {
+        const LocalTokenAppContainerInformation *info = reinterpret_cast<const LocalTokenAppContainerInformation *>(buf.data());
+        oss << " " << sid_summary(info->TokenAppContainer);
+    }
+    log_line(oss.str());
+}
+
+void inspect_token_deep(HANDLE token, const std::string &label) {
+    log_line(label + " begin");
+    log_token_user_like_info(token, static_cast<TOKEN_INFORMATION_CLASS>(1), label + " TokenUser");
+    log_token_owner_info(token, label + " TokenOwner");
+    log_token_groups_info(token, static_cast<TOKEN_INFORMATION_CLASS>(2), label + " TokenGroups");
+    log_token_groups_info(token, static_cast<TOKEN_INFORMATION_CLASS>(11), label + " TokenRestrictedSids");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(12), label + " TokenSessionId");
+    log_token_source_info(token, label + " TokenSource");
+    log_token_origin_info(token, label + " TokenOrigin");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(21), label + " TokenHasRestrictions");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(23), label + " TokenVirtualizationAllowed");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(24), label + " TokenVirtualizationEnabled");
+    log_token_integrity_info(token, label + " TokenIntegrityLevel");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(26), label + " TokenUIAccess");
+    log_token_mandatory_policy_info(token, label + " TokenMandatoryPolicy");
+    log_token_groups_info(token, static_cast<TOKEN_INFORMATION_CLASS>(28), label + " TokenLogonSid");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(29), label + " TokenIsAppContainer");
+    log_token_groups_info(token, static_cast<TOKEN_INFORMATION_CLASS>(30), label + " TokenCapabilities");
+    log_token_appcontainer_sid_info(token, label + " TokenAppContainerSid");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(32), label + " TokenAppContainerNumber");
+    log_token_dword_info(token, static_cast<TOKEN_INFORMATION_CLASS>(40), label + " TokenIsRestricted");
+    log_line(label + " end");
+}
+
+struct TokenRelationSnapshot {
+    std::string label;
+    HANDLE handle = nullptr;
+    bool stats_ok = false;
+    bool type_ok = false;
+    bool elevation_type_ok = false;
+    bool elevation_ok = false;
+    bool integrity_ok = false;
+    bool has_restrictions_ok = false;
+    bool restricted_count_ok = false;
+    bool group_count_ok = false;
+    bool logon_sid_count_ok = false;
+    TOKEN_STATISTICS stats = {};
+    TOKEN_TYPE type = TokenPrimary;
+    TOKEN_ELEVATION_TYPE elevation_type = TokenElevationTypeDefault;
+    DWORD elevated = 0;
+    DWORD integrity_rid = 0;
+    DWORD integrity_attrs = 0;
+    DWORD has_restrictions = 0;
+    DWORD restricted_sid_count = 0;
+    DWORD group_count = 0;
+    DWORD deny_only_group_count = 0;
+    DWORD logon_sid_count = 0;
+    DWORD snapshot_gle = ERROR_SUCCESS;
+};
+
+bool luid_equal(const LUID &a, const LUID &b) {
+    return a.LowPart == b.LowPart && a.HighPart == b.HighPart;
+}
+
+bool capture_group_count(HANDLE token,
+                         TOKEN_INFORMATION_CLASS cls,
+                         DWORD *count,
+                         DWORD *deny_only_count = nullptr) {
+    if (count == nullptr) {
+        return false;
+    }
+    *count = 0;
+    if (deny_only_count != nullptr) {
+        *deny_only_count = 0;
+    }
+
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, cls, &buf, &gle, &ret);
+    if (!ok || buf.empty()) {
+        return false;
+    }
+    const TOKEN_GROUPS *groups = reinterpret_cast<const TOKEN_GROUPS *>(buf.data());
+    *count = groups->GroupCount;
+    if (deny_only_count != nullptr) {
+        DWORD deny_only = 0;
+        for (DWORD i = 0; i < groups->GroupCount; ++i) {
+            if ((groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) != 0) {
+                ++deny_only;
+            }
+        }
+        *deny_only_count = deny_only;
+    }
+    return true;
+}
+
+bool capture_integrity_rid(HANDLE token, DWORD *rid, DWORD *attrs) {
+    if (rid == nullptr || attrs == nullptr) {
+        return false;
+    }
+    *rid = 0;
+    *attrs = 0;
+    std::vector<BYTE> buf;
+    DWORD gle = 0;
+    DWORD ret = 0;
+    bool ok = get_token_info_variable(token, static_cast<TOKEN_INFORMATION_CLASS>(25), &buf, &gle, &ret);
+    if (!ok || buf.empty()) {
+        return false;
+    }
+    const LocalTokenMandatoryLabel *mandatory = reinterpret_cast<const LocalTokenMandatoryLabel *>(buf.data());
+    *attrs = mandatory->Label.Attributes;
+    if (mandatory->Label.Sid == nullptr || !IsValidSid(mandatory->Label.Sid)) {
+        return false;
+    }
+    UCHAR count = *GetSidSubAuthorityCount(mandatory->Label.Sid);
+    if (count == 0) {
+        return false;
+    }
+    *rid = *GetSidSubAuthority(mandatory->Label.Sid, static_cast<DWORD>(count - 1));
+    return true;
+}
+
+TokenRelationSnapshot capture_token_relation_snapshot(HANDLE token,
+                                                      const std::string &label,
+                                                      bool include_group_counts) {
+    TokenRelationSnapshot snap;
+    snap.label = label;
+    snap.handle = token;
+    if (token == nullptr || token == INVALID_HANDLE_VALUE) {
+        snap.snapshot_gle = ERROR_INVALID_HANDLE;
+        return snap;
+    }
+
+    DWORD ret = 0;
+    SetLastError(ERROR_SUCCESS);
+    snap.stats_ok = get_token_info_fixed(token, TokenStatistics, &snap.stats, sizeof(snap.stats), &ret);
+    if (!snap.stats_ok) {
+        snap.snapshot_gle = GetLastError();
+    }
+    SetLastError(ERROR_SUCCESS);
+    snap.type_ok = get_token_info_fixed(token, TokenType, &snap.type, sizeof(snap.type), &ret);
+    SetLastError(ERROR_SUCCESS);
+    snap.elevation_type_ok = get_token_info_fixed(token, TokenElevationType, &snap.elevation_type, sizeof(snap.elevation_type), &ret);
+    TOKEN_ELEVATION elevation = {};
+    SetLastError(ERROR_SUCCESS);
+    snap.elevation_ok = get_token_info_fixed(token, TokenElevation, &elevation, sizeof(elevation), &ret);
+    snap.elevated = elevation.TokenIsElevated;
+    snap.integrity_ok = capture_integrity_rid(token, &snap.integrity_rid, &snap.integrity_attrs);
+    SetLastError(ERROR_SUCCESS);
+    snap.has_restrictions_ok = get_token_info_fixed(token,
+                                                    static_cast<TOKEN_INFORMATION_CLASS>(21),
+                                                    &snap.has_restrictions,
+                                                    sizeof(snap.has_restrictions),
+                                                    &ret);
+    if (include_group_counts) {
+        snap.group_count_ok = capture_group_count(token,
+                                                  static_cast<TOKEN_INFORMATION_CLASS>(2),
+                                                  &snap.group_count,
+                                                  &snap.deny_only_group_count);
+        snap.restricted_count_ok = capture_group_count(token,
+                                                       static_cast<TOKEN_INFORMATION_CLASS>(11),
+                                                       &snap.restricted_sid_count,
+                                                       nullptr);
+        snap.logon_sid_count_ok = capture_group_count(token,
+                                                      static_cast<TOKEN_INFORMATION_CLASS>(28),
+                                                      &snap.logon_sid_count,
+                                                      nullptr);
+    }
+    return snap;
+}
+
+std::string relation_snapshot_summary(const TokenRelationSnapshot &s) {
+    std::ostringstream oss;
+    oss << "[Relation.Snapshot] " << s.label
+        << " handle=" << hex_ptr(s.handle)
+        << " stats_ok=" << yes_no(s.stats_ok);
+    if (s.stats_ok) {
+        oss << " auth=" << luid_to_string(s.stats.AuthenticationId)
+            << " token_id=" << luid_to_string(s.stats.TokenId)
+            << " modified=" << luid_to_string(s.stats.ModifiedId);
+    } else {
+        oss << " gle=" << s.snapshot_gle;
+    }
+    oss << " type=" << (s.type_ok ? token_type_to_string(s.type) : "unavailable")
+        << " elevation_type=" << (s.elevation_type_ok ? elevation_type_to_string(s.elevation_type) : "unavailable")
+        << " elevated=" << (s.elevation_ok ? yes_no(s.elevated != 0) : "unavailable")
+        << " integrity=";
+    if (s.integrity_ok) {
+        oss << integrity_rid_to_string(s.integrity_rid) << "/" << hex_u32(s.integrity_rid);
+    } else {
+        oss << "unavailable";
+    }
+    oss << " has_restrictions=" << (s.has_restrictions_ok ? yes_no(s.has_restrictions != 0) : "unavailable");
+    if (s.group_count_ok) {
+        oss << " groups=" << s.group_count << " deny_only=" << s.deny_only_group_count;
+    }
+    if (s.restricted_count_ok) {
+        oss << " restricted_sids=" << s.restricted_sid_count;
+    }
+    if (s.logon_sid_count_ok) {
+        oss << " logon_sids=" << s.logon_sid_count;
+    }
+    return oss.str();
+}
+
+void log_relation_snapshot(const TokenRelationSnapshot &s, bool dbg) {
+    log_line(relation_snapshot_summary(s), dbg);
+}
+
+bool compare_token_relation(const TokenRelationSnapshot &base,
+                            const TokenRelationSnapshot &other,
+                            const std::string &relation_label,
+                            bool loud) {
+    bool comparable = base.stats_ok && other.stats_ok;
+    bool auth_equal = comparable && luid_equal(base.stats.AuthenticationId, other.stats.AuthenticationId);
+    bool token_equal = comparable && luid_equal(base.stats.TokenId, other.stats.TokenId);
+    bool modified_equal = comparable && luid_equal(base.stats.ModifiedId, other.stats.ModifiedId);
+    bool integrity_equal = base.integrity_ok && other.integrity_ok && base.integrity_rid == other.integrity_rid;
+    bool restriction_equal = base.has_restrictions_ok && other.has_restrictions_ok &&
+                             base.has_restrictions == other.has_restrictions;
+    bool restricted_count_equal = base.restricted_count_ok && other.restricted_count_ok &&
+                                  base.restricted_sid_count == other.restricted_sid_count;
+
+    std::ostringstream oss;
+    oss << "[Relation.Compare] " << relation_label
+        << " base=" << base.label
+        << " other=" << other.label
+        << " auth_equal=" << yes_no(auth_equal)
+        << " token_id_equal=" << yes_no(token_equal)
+        << " modified_equal=" << yes_no(modified_equal)
+        << " integrity_equal=" << (base.integrity_ok && other.integrity_ok ? yes_no(integrity_equal) : "unavailable")
+        << " restrictions_equal=" << (base.has_restrictions_ok && other.has_restrictions_ok ? yes_no(restriction_equal) : "unavailable")
+        << " restricted_count_equal=" << (base.restricted_count_ok && other.restricted_count_ok ? yes_no(restricted_count_equal) : "unavailable");
+    if (base.integrity_ok && other.integrity_ok) {
+        oss << " integrity_delta=" << static_cast<int64_t>(other.integrity_rid) - static_cast<int64_t>(base.integrity_rid);
+    }
+    if (base.restricted_count_ok && other.restricted_count_ok) {
+        oss << " restricted_delta=" << static_cast<int64_t>(other.restricted_sid_count) - static_cast<int64_t>(base.restricted_sid_count);
+    }
+    bool interesting = comparable && (!auth_equal || token_equal);
+    if (loud || interesting) {
+        log_line(oss.str(), loud || interesting);
+    } else {
+        dbg_line(oss.str());
+    }
+    return comparable;
+}
+
 bool token_has_privilege(HANDLE token, const LUID &luid) {
     DWORD needed = 0;
     GetTokenInformation(token, TokenPrivileges, nullptr, 0, &needed);
@@ -717,7 +1284,7 @@ void inspect_privilege(HANDLE token, const wchar_t *priv_name) {
 
 unique_handle open_current_token() {
     HANDLE h = nullptr;
-    DWORD desired = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_ADJUST_PRIVILEGES | TOKEN_ADJUST_DEFAULT;
+    DWORD desired = TOKEN_QUERY | TOKEN_QUERY_SOURCE | TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_ADJUST_PRIVILEGES | TOKEN_ADJUST_DEFAULT;
     if (OpenProcessToken(GetCurrentProcess(), desired, &h)) {
         log_line("[token] OpenProcessToken full access succeeded handle=" + hex_ptr(h));
         return unique_handle(h);
@@ -795,6 +1362,7 @@ void query_rtl_elevation_flags() {
 
 void inspect_current_token(HANDLE token) {
     inspect_token_basic(token, "[token.current]");
+    inspect_token_deep(token, "[token.current.deep]");
     inspect_linked_token_win32(token);
     inspect_privilege(token, SE_DEBUG_NAME);
     inspect_privilege(token, SE_CREATE_TOKEN_NAME);
@@ -803,14 +1371,24 @@ void inspect_current_token(HANDLE token) {
 }
 
 void emit_kd_breadcrumbs(HANDLE current_token, HANDLE target_token, const Config &cfg) {
+    LARGE_INTEGER qpc = {};
+    LARGE_INTEGER freq = {};
+    QueryPerformanceCounter(&qpc);
+    QueryPerformanceFrequency(&freq);
     std::ostringstream oss;
-    oss << "[kd] pid=" << GetCurrentProcessId()
+    oss << "[kd] utc=" << utc_timestamp()
+        << " tick=" << GetTickCount64()
+        << " qpc=" << qpc.QuadPart
+        << " qpf=" << freq.QuadPart
+        << " pid=" << GetCurrentProcessId()
+        << " tid=" << GetCurrentThreadId()
         << " currentToken=" << hex_ptr(current_token)
         << " targetToken=" << hex_ptr(target_token)
         << " mode=" << mode_to_string(cfg.mode)
         << " threads=" << cfg.threads
         << " seconds=" << cfg.seconds;
     log_line(oss.str(), true);
+    kd_breadcrumb("main-token-context", current_token, target_token, STATUS_SUCCESS, true);
     dbg_line("[kd] Suggested breakpoints: nt!NtQueryInformationToken nt!NtSetInformationToken nt!SepDuplicateToken nt!SepTokenDeleteMethod nt!SepDeReferenceLogonSession");
     dbg_line("[kd] This program does not read kernel addresses; inspect _TOKEN.LogonSession and _SEP_LOGON_SESSION_REFERENCES manually in the debugger.");
 }
@@ -1028,6 +1606,77 @@ NTSTATUS duplicate_token_variant_once(HANDLE token,
     return st;
 }
 
+bool self_impersonation_once(HANDLE token, bool effective_only, Stats *stats, bool loud) {
+    SECURITY_QUALITY_OF_SERVICE sqos = {};
+    sqos.Length = sizeof(sqos);
+    sqos.ImpersonationLevel = SecurityImpersonation;
+    sqos.ContextTrackingMode = static_cast<SECURITY_CONTEXT_TRACKING_MODE>(SECURITY_DYNAMIC_TRACKING);
+    sqos.EffectiveOnly = static_cast<BOOLEAN>(FALSE);
+
+    OBJECT_ATTRIBUTES oa = {};
+    oa.Length = sizeof(oa);
+    oa.SecurityQualityOfService = &sqos;
+
+    HANDLE raw_dup = nullptr;
+    NTSTATUS st = g_nt.NtDuplicateToken(token,
+                                        TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                                        &oa,
+                                        static_cast<BOOLEAN>(effective_only ? TRUE : FALSE),
+                                        TokenImpersonation,
+                                        &raw_dup);
+    record_status(stats, st);
+
+    bool ok = false;
+    DWORD set_gle = ERROR_SUCCESS;
+    DWORD open_thread_gle = ERROR_SUCCESS;
+    DWORD revert_gle = ERROR_SUCCESS;
+    unique_handle dup(raw_dup);
+    if (NT_SUCCESS(st) && dup) {
+        SetLastError(ERROR_SUCCESS);
+        BOOL set_ok = SetThreadToken(nullptr, dup.get());
+        set_gle = set_ok ? ERROR_SUCCESS : GetLastError();
+        if (set_ok) {
+            HANDLE raw_thread_token = nullptr;
+            SetLastError(ERROR_SUCCESS);
+            BOOL open_ok = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE, TRUE, &raw_thread_token);
+            open_thread_gle = open_ok ? ERROR_SUCCESS : GetLastError();
+            unique_handle thread_token(raw_thread_token);
+            if (open_ok && loud) {
+                inspect_token_basic(thread_token.get(), "[SelfImpersonate.thread]", true);
+            }
+
+            SetLastError(ERROR_SUCCESS);
+            BOOL revert_ok = RevertToSelf();
+            revert_gle = revert_ok ? ERROR_SUCCESS : GetLastError();
+            if (!revert_ok) {
+                SetThreadToken(nullptr, nullptr);
+            }
+            ok = revert_ok != FALSE;
+        }
+    }
+
+    record_op(stats == nullptr ? nullptr : &stats->impersonate, ok);
+    if (stats != nullptr) {
+        stats->total_ops.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::ostringstream oss;
+    oss << "[SelfImpersonate] effectiveOnly=" << yes_no(effective_only)
+        << " duplicate=" << format_status(st)
+        << " set_gle=" << set_gle
+        << " open_thread_gle=" << open_thread_gle
+        << " revert_gle=" << revert_gle
+        << " ok=" << yes_no(ok);
+    if (loud) {
+        log_line(oss.str(), ok);
+    } else if (ok) {
+        dbg_line(oss.str());
+    } else if (!is_common_gate_status(st) || set_gle != ERROR_SUCCESS || revert_gle != ERROR_SUCCESS) {
+        dbg_line("[unexpected-self-impersonate] " + oss.str());
+    }
+    return ok;
+}
+
 NTSTATUS filter_token_variant_once(HANDLE token, ULONG flags, const std::string &label, bool inspect_returned, Stats *stats, bool loud) {
     HANDLE out = nullptr;
     NTSTATUS st = g_nt.NtFilterToken(token, flags, nullptr, nullptr, nullptr, &out);
@@ -1066,6 +1715,108 @@ NTSTATUS filter_token_variant_once(HANDLE token, ULONG flags, const std::string 
 
 NTSTATUS filter_token_once(HANDLE token, bool inspect_returned, Stats *stats, bool loud) {
     return filter_token_variant_once(token, DISABLE_MAX_PRIVILEGE, "Filter", inspect_returned, stats, loud);
+}
+
+unique_handle query_linked_token_handle_for_relation(HANDLE token, const std::string &label, Stats *stats, bool loud) {
+    HANDLE out = nullptr;
+    ULONG ret_len = 0;
+    TOKEN_INFORMATION_CLASS cls = static_cast<TOKEN_INFORMATION_CLASS>(19);
+    NTSTATUS st = g_nt.NtQueryInformationToken(token, cls, &out, sizeof(out), &ret_len);
+    record_status(stats, st);
+
+    std::ostringstream oss;
+    oss << "[Relation.Handle] " << label
+        << " op=QueryLinked status=" << format_status(st)
+        << " retLen=" << ret_len
+        << " returned=" << hex_ptr(out);
+    if (loud || !is_common_gate_status(st)) {
+        log_line(oss.str(), NT_SUCCESS(st) || !is_common_gate_status(st));
+    } else if (NT_SUCCESS(st)) {
+        dbg_line(oss.str());
+    }
+    kd_breadcrumb("relation-query-linked", token, out, st, loud);
+    if (NT_SUCCESS(st) && out != nullptr) {
+        return unique_handle(out);
+    }
+    if (out != nullptr) {
+        CloseHandle(out);
+    }
+    return unique_handle();
+}
+
+unique_handle duplicate_token_handle_for_relation(HANDLE token,
+                                                 bool effective_only,
+                                                 TOKEN_TYPE token_type,
+                                                 SECURITY_IMPERSONATION_LEVEL level,
+                                                 ACCESS_MASK desired_access,
+                                                 const std::string &label,
+                                                 Stats *stats,
+                                                 bool loud) {
+    SECURITY_QUALITY_OF_SERVICE sqos = {};
+    sqos.Length = sizeof(sqos);
+    sqos.ImpersonationLevel = level;
+    sqos.ContextTrackingMode = static_cast<SECURITY_CONTEXT_TRACKING_MODE>(SECURITY_DYNAMIC_TRACKING);
+    sqos.EffectiveOnly = static_cast<BOOLEAN>(FALSE);
+
+    OBJECT_ATTRIBUTES oa = {};
+    oa.Length = sizeof(oa);
+    oa.SecurityQualityOfService = &sqos;
+
+    HANDLE out = nullptr;
+    NTSTATUS st = g_nt.NtDuplicateToken(token,
+                                        desired_access,
+                                        &oa,
+                                        static_cast<BOOLEAN>(effective_only ? TRUE : FALSE),
+                                        token_type,
+                                        &out);
+    record_status(stats, st);
+
+    std::ostringstream oss;
+    oss << "[Relation.Handle] " << label
+        << " op=Duplicate"
+        << " type=" << token_type_to_string(token_type)
+        << " level=" << impersonation_level_to_string(level)
+        << " effectiveOnly=" << yes_no(effective_only)
+        << " status=" << format_status(st)
+        << " returned=" << hex_ptr(out);
+    if (loud || !is_common_gate_status(st)) {
+        log_line(oss.str(), NT_SUCCESS(st) || !is_common_gate_status(st));
+    } else if (NT_SUCCESS(st)) {
+        dbg_line(oss.str());
+    }
+    kd_breadcrumb("relation-duplicate", token, out, st, loud);
+    if (NT_SUCCESS(st) && out != nullptr) {
+        return unique_handle(out);
+    }
+    if (out != nullptr) {
+        CloseHandle(out);
+    }
+    return unique_handle();
+}
+
+unique_handle filter_token_handle_for_relation(HANDLE token, ULONG flags, const std::string &label, Stats *stats, bool loud) {
+    HANDLE out = nullptr;
+    NTSTATUS st = g_nt.NtFilterToken(token, flags, nullptr, nullptr, nullptr, &out);
+    record_status(stats, st);
+
+    std::ostringstream oss;
+    oss << "[Relation.Handle] " << label
+        << " op=Filter flags=" << hex_u32(flags)
+        << " status=" << format_status(st)
+        << " returned=" << hex_ptr(out);
+    if (loud || !is_common_gate_status(st)) {
+        log_line(oss.str(), NT_SUCCESS(st) || !is_common_gate_status(st));
+    } else if (NT_SUCCESS(st)) {
+        dbg_line(oss.str());
+    }
+    kd_breadcrumb("relation-filter", token, out, st, loud);
+    if (NT_SUCCESS(st) && out != nullptr) {
+        return unique_handle(out);
+    }
+    if (out != nullptr) {
+        CloseHandle(out);
+    }
+    return unique_handle();
 }
 
 void openclose_token_once(Stats *stats) {
@@ -1119,6 +1870,147 @@ void target_pid_churn_once(const Config &cfg, Stats *stats, uint64_t random_bits
         duplicate_token_once(token.get(), (random_bits & 0x10U) != 0, false, stats, false);
     } else if (!cfg.no_filter) {
         filter_token_once(token.get(), false, stats, false);
+    }
+}
+
+void run_relation_pair(const TokenRelationSnapshot &base,
+                       const TokenRelationSnapshot &other,
+                       const std::string &label,
+                       bool loud) {
+    log_relation_snapshot(other, loud);
+    compare_token_relation(base, other, label, loud);
+}
+
+void run_relation_family(HANDLE base_token,
+                         const std::string &base_label,
+                         const Config &cfg,
+                         bool include_group_counts,
+                         bool loud,
+                         Stats *stats) {
+    if (base_token == nullptr) {
+        return;
+    }
+
+    TokenRelationSnapshot base = capture_token_relation_snapshot(base_token, base_label, include_group_counts);
+    log_relation_snapshot(base, loud);
+
+    if (!cfg.no_query19) {
+        unique_handle linked = query_linked_token_handle_for_relation(base_token, base_label + ".linked", stats, loud);
+        if (linked) {
+            TokenRelationSnapshot linked_snap = capture_token_relation_snapshot(linked.get(), base_label + ".linked", include_group_counts);
+            run_relation_pair(base, linked_snap, base_label + "->linked", loud);
+        }
+    }
+
+    unique_handle dup_false;
+    unique_handle dup_true;
+    if (!cfg.no_duplicate) {
+        dup_false = duplicate_token_handle_for_relation(base_token,
+                                                       false,
+                                                       TokenImpersonation,
+                                                       SecurityImpersonation,
+                                                       TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                                                       base_label + ".dupFalse",
+                                                       stats,
+                                                       loud);
+        if (dup_false) {
+            TokenRelationSnapshot dup_snap = capture_token_relation_snapshot(dup_false.get(), base_label + ".dupFalse", include_group_counts);
+            run_relation_pair(base, dup_snap, base_label + "->dupFalse", loud);
+        }
+
+        dup_true = duplicate_token_handle_for_relation(base_token,
+                                                      true,
+                                                      TokenImpersonation,
+                                                      SecurityImpersonation,
+                                                      TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                                                      base_label + ".dupTrue",
+                                                      stats,
+                                                      loud);
+        if (dup_true) {
+            TokenRelationSnapshot dup_snap = capture_token_relation_snapshot(dup_true.get(), base_label + ".dupTrue", include_group_counts);
+            run_relation_pair(base, dup_snap, base_label + "->dupTrue", loud);
+        }
+    }
+
+    unique_handle filtered_disable;
+    unique_handle filtered_zero;
+    if (!cfg.no_filter) {
+        filtered_disable = filter_token_handle_for_relation(base_token, DISABLE_MAX_PRIVILEGE, base_label + ".filterDisableMax", stats, loud);
+        if (filtered_disable) {
+            TokenRelationSnapshot filt_snap = capture_token_relation_snapshot(filtered_disable.get(), base_label + ".filterDisableMax", include_group_counts);
+            run_relation_pair(base, filt_snap, base_label + "->filterDisableMax", loud);
+        }
+
+        filtered_zero = filter_token_handle_for_relation(base_token, 0, base_label + ".filterZero", stats, loud);
+        if (filtered_zero) {
+            TokenRelationSnapshot filt_snap = capture_token_relation_snapshot(filtered_zero.get(), base_label + ".filterZero", include_group_counts);
+            run_relation_pair(base, filt_snap, base_label + "->filterZero", loud);
+        }
+    }
+
+    if (dup_false && filtered_disable) {
+        TokenRelationSnapshot dup_snap = capture_token_relation_snapshot(dup_false.get(), base_label + ".dupFalse.recheck", false);
+        TokenRelationSnapshot filt_snap = capture_token_relation_snapshot(filtered_disable.get(), base_label + ".filterDisableMax.recheck", false);
+        compare_token_relation(dup_snap, filt_snap, base_label + ".dupFalse->filterDisableMax", loud);
+    }
+}
+
+void run_relation_probes(HANDLE current_token, HANDLE target_token, const Config &cfg) {
+    log_line("[Relation] begin", true);
+    kd_breadcrumb("relation-begin", current_token, target_token, STATUS_SUCCESS, true);
+    run_relation_family(current_token, "current", cfg, true, true, nullptr);
+    if (target_token != nullptr) {
+        TokenRelationSnapshot current = capture_token_relation_snapshot(current_token, "current.cross", true);
+        TokenRelationSnapshot target = capture_token_relation_snapshot(target_token, "target", true);
+        log_relation_snapshot(target, true);
+        compare_token_relation(current, target, "current->target", true);
+        run_relation_family(target_token, "target", cfg, true, true, nullptr);
+    }
+    kd_breadcrumb("relation-end", current_token, target_token, STATUS_SUCCESS, true);
+    log_line("[Relation] end", true);
+}
+
+void relation_stress_probe_once(HANDLE current_token, HANDLE target_token, const Config &cfg, Stats *stats, uint64_t bits) {
+    bool ok = false;
+    HANDLE base_token = ((bits & 0x8U) != 0 && target_token != nullptr) ? target_token : current_token;
+    std::string base_label = (base_token == target_token && target_token != nullptr) ? "stress.target" : "stress.current";
+    TokenRelationSnapshot base = capture_token_relation_snapshot(base_token, base_label, false);
+    uint32_t choice = static_cast<uint32_t>(bits & 0x3U);
+
+    if (choice == 0 && !cfg.no_query19) {
+        unique_handle linked = query_linked_token_handle_for_relation(base_token, base_label + ".linked", stats, false);
+        if (linked) {
+            TokenRelationSnapshot linked_snap = capture_token_relation_snapshot(linked.get(), base_label + ".linked", false);
+            ok = compare_token_relation(base, linked_snap, base_label + "->linked", false);
+        }
+    } else if (choice == 1 && !cfg.no_duplicate) {
+        unique_handle dup = duplicate_token_handle_for_relation(base_token,
+                                                               (bits & 0x10U) != 0,
+                                                               TokenImpersonation,
+                                                               SecurityImpersonation,
+                                                               TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,
+                                                               base_label + ".dup",
+                                                               stats,
+                                                               false);
+        if (dup) {
+            TokenRelationSnapshot dup_snap = capture_token_relation_snapshot(dup.get(), base_label + ".dup", false);
+            ok = compare_token_relation(base, dup_snap, base_label + "->dup", false);
+        }
+    } else if (!cfg.no_filter) {
+        unique_handle filt = filter_token_handle_for_relation(base_token,
+                                                             ((bits & 0x20U) != 0) ? DISABLE_MAX_PRIVILEGE : 0,
+                                                             base_label + ".filter",
+                                                             stats,
+                                                             false);
+        if (filt) {
+            TokenRelationSnapshot filt_snap = capture_token_relation_snapshot(filt.get(), base_label + ".filter", false);
+            ok = compare_token_relation(base, filt_snap, base_label + "->filter", false);
+        }
+    }
+
+    record_op(stats == nullptr ? nullptr : &stats->relation, ok);
+    if (stats != nullptr) {
+        stats->total_ops.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -1210,6 +2102,8 @@ void run_matrix(HANDLE current_token, HANDLE target_token, const Config &cfg) {
         log_line("[matrix] Query(-2) skipped by --no-query-shadow");
     }
 
+    run_relation_probes(current_token, target_token, cfg);
+
     if (!cfg.no_duplicate) {
         duplicate_token_once(current_token, false, true, nullptr, true);
         duplicate_token_once(current_token, true, true, nullptr, true);
@@ -1237,6 +2131,16 @@ void run_matrix(HANDLE current_token, HANDLE target_token, const Config &cfg) {
         }
     } else {
         log_line("[matrix] NtDuplicateToken skipped by --no-duplicate");
+    }
+
+    if (!cfg.no_impersonate && !cfg.no_duplicate) {
+        self_impersonation_once(current_token, false, nullptr, true);
+        self_impersonation_once(current_token, true, nullptr, true);
+        if (target_token != nullptr) {
+            log_line("[matrix] Target self-impersonation skipped: target token remains read-only/duplicate-only");
+        }
+    } else {
+        log_line("[matrix] SelfImpersonate skipped by --no-impersonate or --no-duplicate");
     }
 
     if (!cfg.no_filter) {
@@ -1349,6 +2253,10 @@ void print_stress_summary(Stats &stats, DWORD elapsed, bool final) {
         << " openclose_fail=" << stats.openclose.fail.load(std::memory_order_relaxed)
         << " targetchurn_ok=" << stats.targetchurn.ok.load(std::memory_order_relaxed)
         << " targetchurn_fail=" << stats.targetchurn.fail.load(std::memory_order_relaxed)
+        << " impersonate_ok=" << stats.impersonate.ok.load(std::memory_order_relaxed)
+        << " impersonate_fail=" << stats.impersonate.fail.load(std::memory_order_relaxed)
+        << " relation_ok=" << stats.relation.ok.load(std::memory_order_relaxed)
+        << " relation_fail=" << stats.relation.fail.load(std::memory_order_relaxed)
         << status_summary(stats);
     log_line(oss.str(), true);
 }
@@ -1361,7 +2269,7 @@ void worker_loop(unsigned int worker_id, HANDLE current_token, HANDLE target_tok
     TOKEN_INFORMATION_CLASS shadow_class = static_cast<TOKEN_INFORMATION_CLASS>(-2);
 
     while (!g_stop.load(std::memory_order_relaxed)) {
-        int choices[12] = {};
+        int choices[14] = {};
         size_t choice_count = 0;
         if (!cfg.no_query19) {
             choices[choice_count++] = 0;
@@ -1391,6 +2299,10 @@ void worker_loop(unsigned int worker_id, HANDLE current_token, HANDLE target_tok
         if (cfg.pid != 0) {
             choices[choice_count++] = 11;
         }
+        if (!cfg.no_impersonate && !cfg.no_duplicate) {
+            choices[choice_count++] = 12;
+        }
+        choices[choice_count++] = 13;
 
         if (choice_count == 0) {
             openclose_token_once(stats);
@@ -1480,6 +2392,12 @@ void worker_loop(unsigned int worker_id, HANDLE current_token, HANDLE target_tok
             case 11:
                 target_pid_churn_once(cfg, stats, rng());
                 break;
+            case 12:
+                self_impersonation_once(current_token, (rng() & 1U) != 0, stats, false);
+                break;
+            case 13:
+                relation_stress_probe_once(current_token, target_token, cfg, stats, rng());
+                break;
             default:
                 openclose_token_once(stats);
                 break;
@@ -1513,6 +2431,7 @@ BOOL WINAPI console_ctrl_handler(DWORD type) {
 
 void run_stress(HANDLE current_token, HANDLE target_token, const Config &cfg) {
     log_line("[stress] begin", true);
+    kd_breadcrumb("stress-begin", current_token, target_token, STATUS_SUCCESS, true);
     g_stop.store(false, std::memory_order_relaxed);
     Stats stats;
 
@@ -1545,6 +2464,7 @@ void run_stress(HANDLE current_token, HANDLE target_token, const Config &cfg) {
     }
     DWORD elapsed = static_cast<DWORD>((GetTickCount64() - start) / 1000ULL);
     print_stress_summary(stats, elapsed, true);
+    kd_breadcrumb("stress-end", current_token, target_token, STATUS_SUCCESS, true);
     log_line("[stress] end", true);
 }
 
@@ -1556,6 +2476,7 @@ void print_banner(const Config &cfg) {
     log_line("[process] pid=" + std::to_string(pid) + " tid=" + std::to_string(tid));
     log_line("[safe] NON_LPE_VERIFIER_NO_TOKEN_STEALING", true);
     log_line("[safe] AGGRESSIVE_CRASH_VERIFIER_NO_POOL_SPRAY_NO_TOKEN_REPLACE_NO_KERNEL_RW", true);
+    log_line("[safe] SELF_IMPERSONATION_ONLY_DUPLICATE_AND_REVERT", true);
     log_line("[config] mode=" + mode_to_string(cfg.mode) +
              " threads=" + std::to_string(cfg.threads) +
              " seconds=" + std::to_string(cfg.seconds) +
@@ -1603,6 +2524,7 @@ int wmain(int argc, wchar_t **argv) {
         target_token = open_target_token(cfg.pid);
         if (target_token) {
             inspect_token_basic(target_token.get(), "[token.target]");
+            inspect_token_deep(target_token.get(), "[token.target.deep]");
             inspect_linked_token_win32(target_token.get());
         }
     }
